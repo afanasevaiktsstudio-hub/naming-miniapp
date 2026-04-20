@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+.env
+.pytest_cache
+*.db
+tests
+web
+tools
+scripts
+SMOKE_REPORT.md
+SMOKE_CHECKLIST.md
+telegram_naming_bot_plan.md

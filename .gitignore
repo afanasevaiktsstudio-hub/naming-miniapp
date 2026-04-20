@@ -1,0 +1,13 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+*.db
+.pytest_cache/
+
+# web
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.log
