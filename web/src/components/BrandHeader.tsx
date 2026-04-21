@@ -8,7 +8,7 @@ export function BrandHeader() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
     >
-      <span>Аналитикада · Нейминг</span>
+      <span>Аналитикада</span>
     </motion.div>
   );
 }

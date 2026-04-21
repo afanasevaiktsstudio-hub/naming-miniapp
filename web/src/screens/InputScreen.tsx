@@ -49,7 +49,7 @@ export function InputScreen({ initialValue, error, onSubmit }: Props) {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
       >
-        Английское название бренда
+        Английское название ЖК
       </motion.h2>
       <p className="subtitle">
         Например, <em>Riverside</em>, <em>Skyline</em> или <em>Eco Village</em>.

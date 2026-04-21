@@ -74,6 +74,7 @@ a:hover {
 .brand-header {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   font-family: var(--font-display);
   font-weight: 700;
@@ -81,6 +82,7 @@ a:hover {
   color: var(--color-primary-hi);
   text-transform: uppercase;
   font-size: 14px;
+  text-align: center;
 }
 
 .brand-header::before {
@@ -95,7 +97,6 @@ a:hover {
   width: 28px;
   height: 1px;
   background: linear-gradient(90deg, var(--color-primary), transparent);
-  flex: 1;
 }
 
 .card {
