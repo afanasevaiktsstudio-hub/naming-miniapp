@@ -24,7 +24,7 @@ export function WelcomeScreen({ onStart }: Props) {
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.15 }}
       >
-        Русифицируй название ЖК — с размахом и иронией.
+        Русифицируй название ЖК — с размахом и иронией
       </motion.h1>
 
       <motion.p
