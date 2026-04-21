@@ -28,29 +28,59 @@ class NamingService:
         self._access_token: str | None = None
 
     async def generate(self, source_name: str) -> list[dict[str, str]]:
-        token = await self._get_access_token()
-        raw_content = await self._request_variants(token, source_name, strict=False)
+        raw_content = await self._request_variants(source_name, strict=False)
         try:
             variants = self.parse_variants(raw_content)
         except Exception:
             # Retry once with stricter prompt if model returned malformed JSON.
-            raw_content = await self._request_variants(token, source_name, strict=True)
+            raw_content = await self._request_variants(source_name, strict=True)
             try:
                 variants = self.parse_variants(raw_content)
             except Exception:
                 # Last fallback: request pipe-delimited text and parse it.
-                text_rows = await self._request_variants_text(token, source_name)
+                text_rows = await self._request_variants_text(source_name)
                 variants = self._parse_pipe_rows(text_rows)
         if len(variants) < 5:
             # Top up with one more low-temperature pass.
-            extra_rows = await self._request_variants_text(token, source_name)
+            extra_rows = await self._request_variants_text(source_name)
             merged = variants + self._parse_pipe_rows(extra_rows)
             variants = self._normalize_candidates(merged)
         if len(variants) < 5:
             variants = self._pad_variants(source_name, variants)
         return variants[:5]
 
-    async def _request_variants(self, token: str, source_name: str, strict: bool) -> str:
+    async def _post_chat(self, payload: dict) -> str:
+        """POST to /chat/completions with a single retry on 401.
+
+        GigaChat access tokens have a short TTL (~30 minutes). The cached token
+        may look valid on our side but already be rejected by the server.
+        On 401 we drop the cache, refresh and retry the exact same payload once.
+        """
+        url = f"{self.base_url}/chat/completions"
+        async with httpx.AsyncClient(timeout=45.0, verify=self.verify_ssl) as client:
+            token = await self._get_access_token()
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+            if response.status_code == 401:
+                self._access_token = None
+                refreshed = await self._get_access_token()
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {refreshed}"},
+                    json=payload,
+                )
+            response.raise_for_status()
+            data = response.json()
+        return (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+
+    async def _request_variants(self, source_name: str, strict: bool) -> str:
         strict_suffix = (
             "\nReturn ONLY minified valid JSON object. No markdown, no comments, no extra text."
             if strict
@@ -65,31 +95,9 @@ class NamingService:
                 {"role": "user", "content": f"English name: {source_name}"},
             ],
         }
+        return await self._post_chat(payload)
 
-        async with httpx.AsyncClient(timeout=45.0, verify=self.verify_ssl) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-            )
-            if response.status_code == 401:
-                self._access_token = None
-                refreshed_token = await self._get_access_token()
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {refreshed_token}"},
-                    json=payload,
-                )
-            response.raise_for_status()
-            data = response.json()
-
-        return (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-
-    async def _request_variants_text(self, token: str, source_name: str) -> str:
+    async def _request_variants_text(self, source_name: str) -> str:
         payload = {
             "model": self.model,
             "temperature": 0.5,
@@ -105,19 +113,7 @@ class NamingService:
                 {"role": "user", "content": f"English name: {source_name}"},
             ],
         }
-        async with httpx.AsyncClient(timeout=45.0, verify=self.verify_ssl) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-        return (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
+        return await self._post_chat(payload)
 
     async def _get_access_token(self) -> str:
         if self._access_token:

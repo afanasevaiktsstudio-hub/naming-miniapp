@@ -2,6 +2,7 @@ aiogram
 python-dotenv
 httpx
 pytest
+pytest-asyncio
 fastapi
 uvicorn[standard]
 pydantic
