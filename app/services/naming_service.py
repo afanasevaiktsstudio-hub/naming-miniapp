@@ -7,6 +7,11 @@ import httpx
 from app.prompts.naming_prompt import SYSTEM_PROMPT
 
 
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+_JSON_JUNK_CHARS = "{}[],"
+
+
 class NamingService:
     def __init__(
         self,
@@ -28,26 +33,42 @@ class NamingService:
         self._access_token: str | None = None
 
     async def generate(self, source_name: str) -> list[dict[str, str]]:
-        raw_content = await self._request_variants(source_name, strict=False)
-        try:
-            variants = self.parse_variants(raw_content)
-        except Exception:
-            # Retry once with stricter prompt if model returned malformed JSON.
-            raw_content = await self._request_variants(source_name, strict=True)
-            try:
-                variants = self.parse_variants(raw_content)
-            except Exception:
-                # Last fallback: request pipe-delimited text and parse it.
-                text_rows = await self._request_variants_text(source_name)
-                variants = self._parse_pipe_rows(text_rows)
+        """Generate 5 Russified naming variants.
+
+        Guarantees: resulting list has exactly 5 items, no Latin letters
+        in any title, no JSON artifacts in fields. If GigaChat responds
+        with English names or malformed output we perform up to one
+        strict re-request and a pipe-text fallback before padding.
+        """
+        variants = await self._try_json(source_name, strict=False)
+
         if len(variants) < 5:
-            # Top up with one more low-temperature pass.
-            extra_rows = await self._request_variants_text(source_name)
-            merged = variants + self._parse_pipe_rows(extra_rows)
-            variants = self._normalize_candidates(merged)
+            stricter = await self._try_json(source_name, strict=True)
+            variants = self._merge_unique(variants, stricter)
+
+        if len(variants) < 5:
+            try:
+                text_rows = await self._request_variants_text(source_name)
+                variants = self._merge_unique(
+                    variants, self._parse_pipe_rows(text_rows)
+                )
+            except Exception:
+                pass
+
         if len(variants) < 5:
             variants = self._pad_variants(source_name, variants)
+
         return variants[:5]
+
+    async def _try_json(self, source_name: str, strict: bool) -> list[dict[str, str]]:
+        try:
+            raw = await self._request_variants(source_name, strict=strict)
+        except Exception:
+            return []
+        try:
+            return self.parse_variants(raw)
+        except Exception:
+            return []
 
     async def _post_chat(self, payload: dict) -> str:
         """POST to /chat/completions with a single retry on 401.
@@ -82,17 +103,26 @@ class NamingService:
 
     async def _request_variants(self, source_name: str, strict: bool) -> str:
         strict_suffix = (
-            "\nReturn ONLY minified valid JSON object. No markdown, no comments, no extra text."
+            "\n\nВАЖНО: предыдущий ответ содержал латиницу или мусор. "
+            "Верни ТОЛЬКО минифицированный JSON-объект. Все поля — ТОЛЬКО "
+            "на русском (кириллица). Ни одной латинской буквы. Никаких "
+            "markdown, комментариев или пояснений до/после JSON."
             if strict
             else ""
         )
         payload = {
             "model": self.model,
-            "temperature": 0.9 if not strict else 0.7,
+            "temperature": 0.7 if strict else 0.9,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT + strict_suffix},
-                {"role": "user", "content": f"English name: {source_name}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Рабочее англоязычное название: {source_name}. "
+                        "Сгенерируй 5 русифицированных вариантов согласно системным правилам."
+                    ),
+                },
             ],
         }
         return await self._post_chat(payload)
@@ -105,12 +135,18 @@ class NamingService:
                 {
                     "role": "system",
                     "content": (
-                        "Generate exactly 5 lines. "
-                        "Each line format: title | style | comment. "
-                        "No numbering, no markdown, no extra text."
+                        "Сгенерируй ровно 5 строк. Только кириллица, никакой "
+                        "латиницы. Формат каждой строки: "
+                        "title | style | comment. "
+                        "title — русифицированное название (1–6 слов, без "
+                        "латинских букв). "
+                        "style — один из: буквальный, нейтрально-маркетинговый, "
+                        "креативный, короткий и звучный, смелый/необычный. "
+                        "comment — короткий русский комментарий. "
+                        "Без нумерации, markdown, JSON и прочего лишнего текста."
                     ),
                 },
-                {"role": "user", "content": f"English name: {source_name}"},
+                {"role": "user", "content": f"Англоязычное название: {source_name}"},
             ],
         }
         return await self._post_chat(payload)
@@ -148,7 +184,6 @@ class NamingService:
                 raise ValueError("Invalid variants format")
             return NamingService._normalize_candidates(candidates)
         except Exception:
-            # Salvage malformed JSON with regex extraction.
             pattern = re.compile(
                 r'"title"\s*:\s*"(?P<title>.*?)"\s*,\s*"style"\s*:\s*"(?P<style>.*?)"\s*,\s*"comment"\s*:\s*"(?P<comment>.*?)"',
                 re.DOTALL,
@@ -174,43 +209,116 @@ class NamingService:
             if len(parts) < 3:
                 continue
             candidates.append(
-                {"title": parts[0], "style": parts[1], "comment": "|".join(parts[2:]).strip()}
+                {
+                    "title": parts[0],
+                    "style": parts[1],
+                    "comment": "|".join(parts[2:]).strip(),
+                }
             )
         return NamingService._normalize_candidates(candidates)
 
     @staticmethod
+    def _clean_field(value: str) -> str:
+        """Strip JSON artifacts (`}, {`, trailing brackets) and whitespace."""
+        s = str(value).strip().replace("\n", " ").replace("\r", " ")
+        s = re.sub(r"\s+", " ", s)
+        while s and s[-1] in _JSON_JUNK_CHARS:
+            s = s[:-1].rstrip()
+        while s and s[0] in _JSON_JUNK_CHARS:
+            s = s[1:].lstrip()
+        return s
+
+    @staticmethod
+    def _is_russian_title(title: str) -> bool:
+        """Title is acceptable if it has Cyrillic letters and no Latin ones."""
+        if not title:
+            return False
+        if _LATIN_RE.search(title):
+            return False
+        if not _CYRILLIC_RE.search(title):
+            return False
+        return True
+
+    @staticmethod
     def _normalize_candidates(candidates: list[dict]) -> list[dict[str, str]]:
+        """Deduplicate, clean JSON noise, reject variants with Latin titles."""
         unique: list[dict[str, str]] = []
         seen_titles: set[str] = set()
         for item in candidates:
             if not isinstance(item, dict):
                 continue
-            title = str(item.get("title", "")).strip().replace("\n", " ")
-            style = str(item.get("style", "")).strip().replace("\n", " ")
-            comment = str(item.get("comment", "")).strip().replace("\n", " ")
-            if not title:
+            title = NamingService._clean_field(item.get("title", ""))
+            style = NamingService._clean_field(item.get("style", ""))
+            comment = NamingService._clean_field(item.get("comment", ""))
+
+            if not NamingService._is_russian_title(title):
                 continue
+
             normalized = title.lower()
             if normalized in seen_titles:
                 continue
             seen_titles.add(normalized)
-            unique.append({"title": title[:60], "style": style[:80], "comment": comment[:180]})
+            unique.append(
+                {
+                    "title": title[:60],
+                    "style": style[:80],
+                    "comment": comment[:180],
+                }
+            )
             if len(unique) == 5:
                 break
         return unique
 
     @staticmethod
-    def _pad_variants(source_name: str, current: list[dict[str, str]]) -> list[dict[str, str]]:
-        base = source_name.strip() or "Проект"
+    def _merge_unique(
+        primary: list[dict[str, str]], extra: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        seen = {v["title"].lower() for v in primary}
+        merged = list(primary)
+        for item in extra:
+            key = item.get("title", "").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) == 5:
+                break
+        return merged
+
+    @staticmethod
+    def _pad_variants(
+        source_name: str, current: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        """Last-resort filler. Uses neutral Russian words, never the source."""
         fillers = [
-            {"title": f"{base} Рус", "style": "нейтральный", "comment": "Лаконичный вариант с русским акцентом."},
-            {"title": f"{base} Дом", "style": "маркетинговый", "comment": "Более теплый и понятный для аудитории."},
-            {"title": f"{base} Квартал", "style": "девелоперский", "comment": "Подходит для формата жилого комплекса."},
-            {"title": f"{base} Пространство", "style": "креативный", "comment": "Подчеркивает современный характер проекта."},
-            {"title": f"{base} Парк", "style": "универсальный", "comment": "Удачный нейтральный бренд для ЖК."},
+            {
+                "title": "Русский Квартал",
+                "style": "нейтрально-маркетинговый",
+                "comment": "Страховочный вариант: подходит любому ЖК.",
+            },
+            {
+                "title": "Отечественный Двор",
+                "style": "буквальный",
+                "comment": "Подчёркивает идею «по-отечественному».",
+            },
+            {
+                "title": "Радушный Дом",
+                "style": "короткий и звучный",
+                "comment": "Тёплое, понятное имя без иностранщины.",
+            },
+            {
+                "title": "Своё Пространство",
+                "style": "креативный",
+                "comment": "Игра на «своё, родное».",
+            },
+            {
+                "title": "Дубовая Слобода",
+                "style": "смелый/необычный",
+                "comment": "Плотный русский образ на случай пустого ответа.",
+            },
         ]
-        merged = current + fillers
-        return NamingService._normalize_candidates(merged)
+        _ = source_name
+        return NamingService._merge_unique(current, fillers)
 
     @staticmethod
     def _safe_json_load(raw_content: str) -> dict:
@@ -224,6 +332,5 @@ class NamingService:
             raise ValueError("Model response is not JSON object")
         candidate = raw[start : end + 1]
 
-        # Repair malformed control characters that occasionally break JSON parsing.
         candidate = re.sub(r"[\x00-\x1F]", " ", candidate)
         return json.loads(candidate)
