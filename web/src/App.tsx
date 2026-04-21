@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "framer-motion";
 import { useTelegramInit, getWebApp, hapticNotify } from "./lib/telegram";
 import {
-  fetchSession,
   requestVariants,
   selectVariant,
   type ApiError,
@@ -27,31 +26,11 @@ const EMPTY_SESSION: SessionState = {
 export function App() {
   useTelegramInit();
 
+  // Каждое открытие мини-аппа начинается с welcome-экрана: мы сознательно
+  // не восстанавливаем прошлый выбор пользователя из backend-сессии.
   const [stage, setStage] = useState<Stage>("welcome");
   const [session, setSession] = useState<SessionState>(EMPTY_SESSION);
   const [error, setError] = useState<string | null>(null);
-  const [hydrating, setHydrating] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchSession()
-      .then((s) => {
-        if (cancelled) return;
-        setSession(s);
-        if (s.selected_index != null && s.variants.length) {
-          setStage("selected");
-        } else if (s.variants.length) {
-          setStage("variants");
-        }
-      })
-      .catch(() => {
-        /* нет сессии — остаёмся на welcome */
-      })
-      .finally(() => !cancelled && setHydrating(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const handleStart = useCallback(() => {
     setStage("input");
@@ -118,7 +97,6 @@ export function App() {
   }, [stage, handleBack]);
 
   const screen = useMemo(() => {
-    if (hydrating) return <LoadingScreen label="Загружаю сессию..." />;
     switch (stage) {
       case "welcome":
         return <WelcomeScreen onStart={handleStart} />;
@@ -156,7 +134,6 @@ export function App() {
       }
     }
   }, [
-    hydrating,
     stage,
     session,
     error,
