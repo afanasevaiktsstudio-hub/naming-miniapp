@@ -1,2 +1,7 @@
-/assets/*    /assets/:splat    404
-/*           /index.html       200
+# SPA has no client-side routing — it always lives at `/`.
+# We intentionally do NOT add a catch-all `/*  /index.html  200` here:
+# otherwise Cloudflare Pages would silently serve index.html as the body
+# of missing `/assets/*.js` requests (stale Telegram cache → SyntaxError →
+# blank screen). With no redirect rules, Pages returns a real 404 for
+# missing assets, the <script> onerror fires, and the inline boot-fallback
+# in index.html shows a helpful "clear Telegram cache" message.
